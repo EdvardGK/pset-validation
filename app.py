@@ -606,6 +606,17 @@ def create_excel_report(validations: List[FileValidation]) -> bytes:
         detail_start_row = len(summary_df) + 3
         details_df.to_excel(writer, sheet_name="Rapport", index=False, startrow=detail_start_row)
 
+        # Auto-fit column widths
+        worksheet = writer.sheets["Rapport"]
+        for column_cells in worksheet.columns:
+            max_length = 0
+            column_letter = column_cells[0].column_letter
+            for cell in column_cells:
+                if cell.value:
+                    max_length = max(max_length, len(str(cell.value)))
+            adjusted_width = min(max_length + 2, 50)  # Cap at 50 chars
+            worksheet.column_dimensions[column_letter].width = adjusted_width
+
     return output.getvalue()
 
 
@@ -650,6 +661,12 @@ def create_html_report(validations: List[FileValidation]) -> str:
         .summary-card.error {{ border-left-color: #ef4444; }} .summary-card.error .value {{ color: #dc2626; }}
         .summary-card.warning {{ border-left-color: #f59e0b; }} .summary-card.warning .value {{ color: #d97706; }}
         .summary-card.missing {{ border-left-color: #8b5cf6; }} .summary-card.missing .value {{ color: #7c3aed; }}
+        .pset-tile {{ border-radius: 10px; padding: 16px; text-align: center; box-shadow: 0 2px 6px rgba(0,0,0,0.1); }}
+        .pset-tile h4 {{ font-size: 0.75rem; text-transform: uppercase; margin-bottom: 6px; opacity: 0.9; }}
+        .pset-tile .value {{ font-size: 1.4rem; font-weight: 700; }}
+        .pset-tile.ok {{ background: #10b981; color: white; }}
+        .pset-tile.warning {{ background: #f59e0b; color: black; }}
+        .pset-tile.error {{ background: #ef4444; color: white; }}
         .file-section {{ background: white; border-radius: 12px; padding: 20px; margin-bottom: 15px; box-shadow: 0 2px 8px rgba(0,0,0,0.06); }}
         .file-header {{ display: flex; justify-content: space-between; align-items: center; cursor: pointer; padding-bottom: 15px; border-bottom: 2px solid #e2e8f0; margin-bottom: 15px; }}
         .file-header h2 {{ font-size: 1.1rem; color: #2d4a3e; }}
@@ -804,6 +821,27 @@ st.markdown("""
     .summary-card.missing { border-left-color: #8b5cf6; }
     .summary-card.missing .value { color: #7c3aed; }
 
+    /* Pset check tile - solid background */
+    .pset-tile {
+        border-radius: 10px;
+        padding: 1rem;
+        text-align: center;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    .pset-tile h4 {
+        font-size: 0.7rem;
+        text-transform: uppercase;
+        margin: 0 0 0.5rem 0;
+        opacity: 0.9;
+    }
+    .pset-tile .value {
+        font-size: 1.4rem;
+        font-weight: 700;
+    }
+    .pset-tile.ok { background: #10b981; color: white; }
+    .pset-tile.warning { background: #f59e0b; color: black; }
+    .pset-tile.error { background: #ef4444; color: white; }
+
     /* Streamlit overrides */
     .stAlert { border-radius: 10px; }
     #MainMenu { visibility: hidden; }
@@ -855,7 +893,7 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-# File upload
+# File upload - full width initially, split after upload
 uploaded_files = st.file_uploader(
     "Last opp IFC-filer med utsparinger",
     type=['ifc'],
@@ -872,6 +910,31 @@ if uploaded_files:
             file_contents[uploaded_file.name] = content
             validation = validate_ifc_file(content, uploaded_file.name)
             validations.append(validation)
+
+    # Check pset status per file - one tile each (up to 4)
+    def get_file_pset_status(fv):
+        has_correct = any(e.has_pset for e in fv.elements)
+        has_wrong = any(e.pset_name_found and "(feil plassering)" in e.pset_name_found for e in fv.elements)
+        if has_correct:
+            return "ok", "A4_Utsp", None
+        elif has_wrong:
+            for e in fv.elements:
+                if e.pset_name_found and "(feil plassering)" in e.pset_name_found:
+                    return "warning", e.pset_name_found.replace(" (feil plassering)", ""), "Feil pset-navn"
+            return "warning", "Ukjent", "Feil pset-navn"
+        else:
+            return "error", "Ikke funnet", None
+
+    # Build tiles HTML in a flex row
+    tile_parts = []
+    for fv in validations[:4]:  # Max 4 files
+        status_class, status_text, subtitle = get_file_pset_status(fv)
+        filename = fv.filename.replace(".ifc", "")
+        subtitle_html = f'<div style="font-size: 0.75rem; margin-top: 4px; opacity: 0.85;">{subtitle}</div>' if subtitle else ''
+        tile_parts.append(f'<div class="pset-tile {status_class}" style="flex: 1;"><h4>{filename}</h4><div class="value">{status_text}</div>{subtitle_html}</div>')
+
+    tiles_html = f'<div style="display: flex; gap: 0.75rem; margin-bottom: 1rem;">{"".join(tile_parts)}</div>'
+    st.markdown(tiles_html, unsafe_allow_html=True)
 
     # Overall summary using custom HTML cards
     totals = {
@@ -935,7 +998,7 @@ if uploaded_files:
             use_container_width=True
         )
     with dl_cols[2]:
-        # Combine all IFC files into one download or first one
+        # IFC download - single or multiple files
         if len(validations) == 1:
             fv = validations[0]
             ifc_data = create_validated_ifc(file_contents[fv.filename], fv.filename, fv)
@@ -947,8 +1010,8 @@ if uploaded_files:
                 use_container_width=True
             )
         else:
-            # Multiple files - show expander with individual downloads
-            with st.popover("🏗️ Last ned IFC"):
+            # Multiple files - popover with individual downloads
+            with st.popover("🏗️ Last ned IFC", use_container_width=True):
                 for idx, fv in enumerate(validations):
                     ifc_data = create_validated_ifc(file_contents[fv.filename], fv.filename, fv)
                     stem = Path(fv.filename).stem
@@ -964,10 +1027,19 @@ if uploaded_files:
     # Store validations in session state for fragment access
     st.session_state['validations'] = validations
 
-    # Data table in a fragment to prevent scroll reset on tab change
-    @st.fragment
-    def render_data_table():
+    # Full-screen dialog for viewing results
+    @st.dialog("Valideringsresultater", width="large")
+    def show_results_dialog():
         vals = st.session_state.get('validations', [])
+
+        # Compact summary at top of dialog
+        totals = st.session_state.get('totals', {})
+        st.markdown(f"**{totals.get('total', 0)}** elementer: "
+                   f"✅ {totals.get('ok', 0)} OK · "
+                   f"❌ {totals.get('feil', 0)} Feil · "
+                   f"⚠️ {totals.get('advarsel', 0)} Advarsler · "
+                   f"🟣 {totals.get('mangler_pset', 0)} Mangler")
+
         filter_tabs = st.tabs(["Alle", "OK", "Feil", "Advarsel", "Mangler pset"])
 
         for tab, status_filter in zip(filter_tabs, ["Alle", "OK", "Feil", "Advarsel", "Mangler pset"]):
@@ -977,13 +1049,21 @@ if uploaded_files:
                     for ev in fv.elements:
                         if status_filter != "Alle" and ev.overall_status != status_filter:
                             continue
+                        pset_display = ev.pset_name_found or "-"
+                        if pset_display and "(feil plassering)" in pset_display:
+                            pset_display = pset_display.replace(" (feil plassering)", " ⚠️")
                         rows.append({
                             "Fil": fv.filename.replace(".ifc", ""),
+                            "Pset": pset_display,
                             "Status": ev.overall_status,
                             "A4_Utsp_ID": ev.properties_found.get("A4_Utsp_ID", "-"),
                             "ObjectType": ev.object_type or "-",
-                            "Feilmeldinger": get_error_messages(ev),
+                            "Feil": get_error_messages(ev) or "-",
                             "GUID": ev.guid,
+                            # Extra data for detail view (JSON strings for Arrow compatibility)
+                            "_all_psets": json.dumps(ev.all_psets),
+                            "_properties": json.dumps({k: str(v) if v is not None else None for k, v in ev.properties_found.items()}),
+                            "_validations": json.dumps({k: [v.is_valid, v.message, v.severity] for k, v in ev.property_validations.items()}),
                         })
 
                 if rows:
@@ -999,12 +1079,101 @@ if uploaded_files:
                         return colors.get(val, "")
 
                     styled_df = df.style.map(color_status, subset=["Status"])
-                    st.dataframe(styled_df, use_container_width=True, hide_index=True, height=500)
-                else:
-                    # Fixed height container to prevent layout shift
-                    st.container(height=500).info("Ingen elementer i denne kategorien.")
 
-    render_data_table()
+                    event = st.dataframe(
+                        styled_df,
+                        hide_index=True,
+                        height=500,
+                        on_select="rerun",
+                        selection_mode="single-row",
+                        column_config={
+                            "Fil": st.column_config.TextColumn("Fil", width="small"),
+                            "Pset": st.column_config.TextColumn("Pset", width="small"),
+                            "Feil": st.column_config.TextColumn("Feil", width="large"),
+                            "GUID": st.column_config.TextColumn("GUID", width="small"),
+                            # Hide internal columns
+                            "_all_psets": None,
+                            "_properties": None,
+                            "_validations": None,
+                        },
+                        key=f"dialog_df_{status_filter}"
+                    )
+
+                    if event.selection and event.selection.rows:
+                        selected_idx = event.selection.rows[0]
+                        selected_row = df.iloc[selected_idx]
+                        with st.container(border=True):
+                            st.markdown(f"**{selected_row['A4_Utsp_ID']}** — {selected_row['Status']}")
+                            st.caption(f"GUID: `{selected_row['GUID']}`")
+
+                            if selected_row['Feil'] != "-":
+                                st.error(selected_row['Feil'])
+
+                            # Show detected pset info
+                            col1, col2 = st.columns(2)
+                            with col1:
+                                st.markdown("**Detektert Pset:**")
+                                pset_name = selected_row['Pset']
+                                if pset_name == "-":
+                                    st.warning("Ingen A4_Utsp pset funnet")
+                                elif "⚠️" in pset_name:
+                                    st.warning(f"`{pset_name}` (feil plassering)")
+                                else:
+                                    st.success(f"`{pset_name}`")
+
+                            with col2:
+                                st.markdown("**Alle psets på element:**")
+                                all_psets = json.loads(selected_row['_all_psets'])
+                                if all_psets:
+                                    st.text("\n".join(all_psets))
+                                else:
+                                    st.text("(ingen)")
+
+                            # Show properties with validation status
+                            st.markdown("**Egenskaper:**")
+                            props = json.loads(selected_row['_properties'])
+                            validations = json.loads(selected_row['_validations'])
+
+                            if props:
+                                prop_rows = []
+                                for prop_name, value in props.items():
+                                    val_info = validations.get(prop_name, [True, "OK", "ok"])
+                                    is_valid, message, severity = val_info
+                                    status_icon = "✅" if is_valid and severity != "warning" else "⚠️" if severity == "warning" else "❌"
+                                    prop_rows.append({
+                                        "": status_icon,
+                                        "Egenskap": prop_name,
+                                        "Verdi": str(value) if value is not None else "(tom)",
+                                        "Validering": message
+                                    })
+                                st.dataframe(
+                                    pd.DataFrame(prop_rows),
+                                    hide_index=True,
+                                    key=f"props_{status_filter}_{selected_idx}"
+                                )
+                            else:
+                                st.info("Ingen A4_Utsp egenskaper funnet")
+                else:
+                    st.info("Ingen elementer i denne kategorien.")
+
+    # Store totals for dialog
+    st.session_state['totals'] = totals
+
+    # Red button to open dialog
+    st.markdown("""
+    <style>
+    div.stButton > button[kind="primary"] {
+        background-color: #dc2626;
+        border-color: #dc2626;
+    }
+    div.stButton > button[kind="primary"]:hover {
+        background-color: #b91c1c;
+        border-color: #b91c1c;
+    }
+    </style>
+    """, unsafe_allow_html=True)
+    if st.button("📋 Se resultater i fullskjerm", use_container_width=True, type="primary"):
+        show_results_dialog()
 
 else:
     st.info("Last opp IFC-filer med utsparinger for å validere mot A4_Utsp krav.")
